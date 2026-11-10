@@ -14,6 +14,7 @@ type Json = Record<string, any>;
 const CHAT = -100;
 const USER = 7;
 const A = "aaaa000000000000";
+const B = "bbbb000000000000";
 const dir = mkdtempSync(path.join(tmpdir(), "lmk-tg-test-"));
 const chat = { id: CHAT };
 const from = { id: USER };
@@ -45,7 +46,7 @@ const server = createServer(async (req, res) => {
   if (url === "/call") {
     const call = JSON.parse(await text(req));
     did(call);
-    if (call.lmk.includes("members")) return res.end(JSON.stringify({ members: [{ fp: A, intro: "Agent A" }] }));
+    if (call.lmk.includes("members")) return res.end(JSON.stringify({ members: [{ fp: A }, { fp: B }, { fp: "bbbb100000000000" }] }));
     if (call.lmk.includes("gone")) return res.writeHead(500).end("letmeknow: no message has an id that begins gone");
     return res.end(JSON.stringify({ id: `h${++answered}` }));
   }
@@ -105,10 +106,10 @@ after(() => {
   rmSync(dir, { recursive: true });
 });
 
-test("an agent's text opens its topic", async () => {
+test("an agent's text opens its topic, named by its fingerprint's first four digits", async () => {
   await agent({ id: "m1", content: "hello" });
-  assert.deepEqual(await next(), { lmk: ["--session", "S", "members"], text: "" });
-  assert.deepEqual(await next(), { tg: "createForumTopic", chat_id: CHAT, name: "aaaa Agent A" });
+  assert.deepEqual(await next(), { lmk: ["--session", "S", "members", "--all"], text: "" });
+  assert.deepEqual(await next(), { tg: "createForumTopic", chat_id: CHAT, name: "aaaa" });
   assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 100, text: "hello" });
 });
 
@@ -189,8 +190,8 @@ test("a member whose topic was deleted gets a new one", async () => {
   deleted.add(100);
   await agent({ id: "m6", content: "moved" });
   assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 100, text: "moved" });
-  assert.deepEqual(await next(), { lmk: ["--session", "S", "members"], text: "" });
-  assert.deepEqual(await next(), { tg: "createForumTopic", chat_id: CHAT, name: "aaaa Agent A" });
+  assert.deepEqual(await next(), { lmk: ["--session", "S", "members", "--all"], text: "" });
+  assert.deepEqual(await next(), { tg: "createForumTopic", chat_id: CHAT, name: "aaaa" });
   assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: "moved" });
 });
 
@@ -219,4 +220,11 @@ test("what is neither text, a file nor a button press comes as Telegram's update
   assert.deepEqual(await next(), { lmk: sent("--reply-to", "m1", "--to", A), text });
   text = update({ message_id: 71, forum_topic_created: { name: "new" } });
   assert.deepEqual(await next(), { lmk: sent(), text });
+});
+
+test("a topic's name takes more digits where another member's fingerprint begins the same", async () => {
+  await agent({ id: "b1", from: B, content: "hi" });
+  assert.deepEqual(await next(), { lmk: ["--session", "S", "members", "--all"], text: "" });
+  assert.deepEqual(await next(), { tg: "createForumTopic", chat_id: CHAT, name: "bbbb0" });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 102, text: "hi" });
 });

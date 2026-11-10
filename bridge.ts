@@ -59,9 +59,10 @@ function lmk(args: string[], text?: string): Promise<any> {
 
 async function topic(fp: string): Promise<number> {
   if (!topicOf.has(fp)) {
-    const { members } = await lmk(["members"]);
-    const intro = members.find((member: Json) => member.fp === fp)?.intro ?? "";
-    const created = await tg("createForumTopic", { chat_id: config.chat, name: `${fp.slice(0, 4)} ${intro}`.slice(0, 128).trim() });
+    const { members } = await lmk(["members", "--all"]);
+    let name = fp.slice(0, 4);
+    while (members.some((member: Json) => member.fp !== fp && member.fp.startsWith(name))) name = fp.slice(0, name.length + 1);
+    const created = await tg("createForumTopic", { chat_id: config.chat, name });
     record({ fp, topic: created.message_thread_id });
   }
   return topicOf.get(fp)!;

@@ -2,7 +2,7 @@
 
 Bridges one [letmeknow](https://letmeknow.dev) group and one person's Telegram chat with a bot. The bridge is a member of the group; to the other members it is that person.
 
-Each member that reaches the person gets a topic in the chat, named by its fingerprint's first four digits and its intro, and a new one with its next message once that is deleted.
+Each member that reaches the person gets a topic in the chat, named by its fingerprint's first four digits, or more where another member's begins the same, and a new one with its next message once that is deleted.
 
 ## For members of the group
 
