@@ -16,10 +16,11 @@ What the bridge's session prints reaches Telegram, in your topic: messages addre
 
 From Telegram:
 
-- A reply to a message of yours, or a press of a button under it (the content is the button's `callback_data`), comes as a reply to your message, addressed to you.
+- A reply to a message of yours, a reaction to it, or a press of a button under it (the content is the button's `callback_data`), comes as a reply to your message, addressed to you.
 - A message in your topic comes addressed to you.
 - Any other message comes urgent, to every member. In a private chat, Telegram opens a new topic for a message sent outside every topic.
-- A file comes as the attachment, and its caption as the content. Telegram may take minutes to hand a file over, so it may come after messages sent later. Messages with neither text nor a file are not passed on.
+- A file comes as the attachment, and its caption as the content. Telegram may take minutes to hand a file over, so it may come after messages sent later.
+- What is neither text, a file nor a button press comes as Telegram's [update](https://core.telegram.org/bots/api#update), in JSON: a location, a poll, an edit of a message, a reaction. Outside every member's topic it is addressed to no one.
 
 ## Setup
 

@@ -173,10 +173,9 @@ test("a later message does not wait for a file", async () => {
   assert.equal((await next()).file, "voice bytes");
 });
 
-test("service messages, other chats and other senders are dropped, and a failed send is reported", async () => {
+test("other chats and other senders are dropped, and a failed send is reported", async () => {
   await agent({ id: "gone", content: "bye" });
   assert.equal((await next()).text, "bye");
-  human({ message_id: 54, message_thread_id: 100, forum_topic_edited: { name: "renamed" } });
   human({ message_id: 55, chat: { id: 8 }, text: "another chat" });
   human({ message_id: 55, from: { id: 8 }, text: "another sender" });
   human({ message_id: 56, message_thread_id: 100, text: "wait", reply_to_message: { message_id: 7 } });
@@ -205,4 +204,19 @@ test("topics and messages outlast a restart", async () => {
   assert.deepEqual(await next(), { lmk: sent("--reply-to", "m1", "--to", A), text: "again" });
   await agent({ id: "m7", content: "back" });
   assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: "back" });
+});
+
+test("what is neither text, a file nor a button press comes as Telegram's update", async () => {
+  const update = (fields: Json, kind = "message") => {
+    human(fields, kind);
+    return JSON.stringify({ update_id: updateId, [kind]: { chat, from, ...fields } });
+  };
+  let text = update({ message_id: 70, message_thread_id: 101, location: { latitude: 22.3, longitude: 114.2 } });
+  assert.deepEqual(await next(), { lmk: sent("--to", A), text });
+  text = update({ message_id: 57, message_thread_id: 101, text: "again!", edit_date: 1 }, "edited_message");
+  assert.deepEqual(await next(), { lmk: sent("--to", A), text });
+  text = update({ message_id: 1, from: undefined, user: from, new_reaction: [{ type: "emoji", emoji: "👍" }] }, "message_reaction");
+  assert.deepEqual(await next(), { lmk: sent("--reply-to", "m1", "--to", A), text });
+  text = update({ message_id: 71, forum_topic_created: { name: "new" } });
+  assert.deepEqual(await next(), { lmk: sent(), text });
 });

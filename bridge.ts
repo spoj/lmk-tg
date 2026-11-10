@@ -98,17 +98,20 @@ async function fromLmk(event: Json): Promise<void> {
 }
 
 async function fromTelegram(update: Json): Promise<void> {
+  const [kind, body] = Object.entries(update).find(([key]) => key !== "update_id")!;
   const query = update.callback_query;
-  const message = update.message ?? query.message;
-  if (message.chat.id !== config.chat || (query ?? message).from.id !== config.user) return;
-  const media = !query && (message.document ?? message.photo?.at(-1) ?? message.video ?? message.audio ?? message.voice
+  const message = query?.message ?? body;
+  if (message.chat.id !== config.chat || (body.from ?? body.user).id !== config.user) return;
+  const fresh = kind === "message";
+  const media = fresh && (message.document ?? message.photo?.at(-1) ?? message.video ?? message.audio ?? message.voice
     ?? message.animation ?? message.video_note ?? message.sticker);
-  const content = query ? query.data : message.text ?? message.caption ?? "";
-  // Service messages, and kinds that carry neither text nor a file, are not passed on.
-  if (!content && !media) return;
-  const origin = lmkOf.get((query ? message : message.reply_to_message)?.message_id);
+  const text = query ? query.data : fresh ? message.text ?? message.caption : undefined;
+  // What is neither text, a file nor a button press comes as Telegram's update, to no one outside every member's topic.
+  const raw = text === undefined && !media;
+  const content = raw ? JSON.stringify(update) : text ?? "";
+  const origin = lmkOf.get((fresh ? message.reply_to_message : message)?.message_id);
   const member = [...topicOf].find(([, thread]) => thread === message.message_thread_id)?.[0];
-  const args = origin?.fp ? ["--reply-to", origin.lmk, "--to", origin.fp] : member ? ["--to", member] : ["--urgent"];
+  const args = origin?.fp ? ["--reply-to", origin.lmk, "--to", origin.fp] : member ? ["--to", member] : raw ? [] : ["--urgent"];
   const forward = async () => {
     const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
     try {
@@ -122,7 +125,7 @@ async function fromTelegram(update: Json): Promise<void> {
       }
       const { id } = await lmk(["send", ...args], content);
       if (query) await tg("answerCallbackQuery", { callback_query_id: query.id });
-      else record({ tg: message.message_id, lmk: id });
+      else if (fresh) record({ tg: message.message_id, lmk: id });
     } catch (error) {
       await tg("sendMessage", {
         chat_id: config.chat,
@@ -152,7 +155,7 @@ void (async () => {
 })();
 
 for (let offset = 0; ;) {
-  const updates: Json[] = await tg("getUpdates", { offset, timeout: 50, allowed_updates: ["message", "callback_query"] })
+  const updates: Json[] = await tg("getUpdates", { offset, timeout: 50, allowed_updates: ["message", "edited_message", "callback_query", "message_reaction"] })
     .catch(async (error) => {
       console.error(error);
       await sleep(5_000);
