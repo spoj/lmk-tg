@@ -19,7 +19,7 @@ From Telegram:
 - A reply to a message of yours, or a press of a button under it (the content is the button's `callback_data`), comes as a reply to your message, addressed to you.
 - A message in your topic comes addressed to you.
 - Any other message comes urgent, to every member.
-- A file comes as the attachment, and its caption as the content. Messages with neither text nor a file are not passed on.
+- A file comes as the attachment, and its caption as the content. Telegram may take minutes to hand a file over, so it may come after messages sent later. Messages with neither text nor a file are not passed on.
 
 ## Setup
 

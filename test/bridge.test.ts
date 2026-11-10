@@ -34,6 +34,7 @@ let posted = 0;
 let topics = 0;
 const deleted = new Set<unknown>();
 let answered = 0;
+let held: Promise<void> | undefined;
 
 const server = createServer(async (req, res) => {
   const url = req.url!;
@@ -59,6 +60,7 @@ const server = createServer(async (req, res) => {
   did({ tg: method, ...params });
   const refuse = (description: string) => res.end(JSON.stringify({ ok: false, description }));
   if (method === "fail") return refuse("Bad Request: nope");
+  if (method === "getFile") await held;
   if (deleted.has(params.message_thread_id)) return refuse("Bad Request: message thread not found");
   answer(method === "createForumTopic" ? { message_thread_id: 99 + ++topics }
     : method === "getFile" ? { file_path: "voice/file_1.oga" }
@@ -158,6 +160,17 @@ test("a file arrives as an attachment", async () => {
   const call = await next();
   assert.equal(path.basename(call.lmk.at(-2)), "file_1.oga");
   assert.deepEqual({ ...call, lmk: call.lmk.toSpliced(-2, 1) }, { lmk: sent("--to", A, "--attach"), text: "", file: "voice bytes" });
+});
+
+test("a later message does not wait for a file", async () => {
+  const file = Promise.withResolvers<void>();
+  held = file.promise;
+  human({ message_id: 60, message_thread_id: 100, voice: { file_id: "f2" } });
+  assert.deepEqual(await next(), { tg: "getFile", file_id: "f2" });
+  human({ message_id: 61, message_thread_id: 100, text: "meanwhile" });
+  assert.deepEqual(await next(), { lmk: sent("--to", A), text: "meanwhile" });
+  file.resolve();
+  assert.equal((await next()).file, "voice bytes");
 });
 
 test("service messages, other chats and other senders are dropped, and a failed send is reported", async () => {

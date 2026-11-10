@@ -109,29 +109,34 @@ async function fromTelegram(update: Json): Promise<void> {
   const origin = lmkOf.get((query ? message : message.reply_to_message)?.message_id);
   const member = [...topicOf].find(([, thread]) => thread === message.message_thread_id)?.[0];
   const args = origin?.fp ? ["--reply-to", origin.lmk, "--to", origin.fp] : member ? ["--to", member] : ["--urgent"];
-  const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
-  try {
-    if (media) {
-      const { file_path } = await tg("getFile", { file_id: media.file_id });
-      const response = await fetch(`${root}/file/bot${config.token}/${file_path}`);
-      if (!response.ok) throw new Error(`file download: HTTP ${response.status}`);
-      const target = path.join(temp, path.basename(media.file_name ?? file_path));
-      await writeFile(target, Buffer.from(await response.arrayBuffer()));
-      args.push("--attach", target);
+  const forward = async () => {
+    const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
+    try {
+      if (media) {
+        const { file_path } = await tg("getFile", { file_id: media.file_id });
+        const response = await fetch(`${root}/file/bot${config.token}/${file_path}`);
+        if (!response.ok) throw new Error(`file download: HTTP ${response.status}`);
+        const target = path.join(temp, path.basename(media.file_name ?? file_path));
+        await writeFile(target, Buffer.from(await response.arrayBuffer()));
+        args.push("--attach", target);
+      }
+      const { id } = await lmk(["send", ...args], content);
+      if (query) await tg("answerCallbackQuery", { callback_query_id: query.id });
+      else record({ tg: message.message_id, lmk: id });
+    } catch (error) {
+      await tg("sendMessage", {
+        chat_id: config.chat,
+        message_thread_id: message.message_thread_id,
+        text: String(error),
+        reply_parameters: { message_id: message.message_id },
+      });
+    } finally {
+      await rm(temp, { recursive: true });
     }
-    const { id } = await lmk(["send", ...args], content);
-    if (query) await tg("answerCallbackQuery", { callback_query_id: query.id });
-    else record({ tg: message.message_id, lmk: id });
-  } catch (error) {
-    await tg("sendMessage", {
-      chat_id: config.chat,
-      message_thread_id: message.message_thread_id,
-      text: String(error),
-      reply_parameters: { message_id: message.message_id },
-    });
-  } finally {
-    await rm(temp, { recursive: true });
-  }
+  };
+  // Telegram may take minutes to hand over a file: later messages do not wait for it.
+  if (media) void forward().catch(console.error);
+  else await forward();
 }
 
 if (existsSync(statePath)) for (const line of readFileSync(statePath, "utf8").split("\n")) if (line) apply(JSON.parse(line));
