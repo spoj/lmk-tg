@@ -1,0 +1,12 @@
+# systemd user unit: copy to ~/.config/systemd/user/, then
+#   systemctl --user enable --now lmk-tg
+[Unit]
+Description=letmeknow-Telegram bridge
+
+[Service]
+ExecStart=/usr/bin/env node %h/src/lmk-tg/bridge.ts %h/.local/share/lmk-tg
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
