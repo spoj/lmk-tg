@@ -12,7 +12,7 @@ type Json = Record<string, any>;
 type Entry = { tg: number; lmk: string; fp?: string } | { topic: number; fp: string };
 
 const dir = process.argv[2];
-const config: { token: string; user: number; session: string; letmeknow: string; api?: string } =
+const config: { token: string; chat: number; user: number; session: string; letmeknow: string; api?: string } =
   JSON.parse(readFileSync(path.join(dir, "config.json"), "utf8"));
 const root = config.api ?? "https://api.telegram.org";
 const statePath = path.join(dir, "state.jsonl");
@@ -61,14 +61,14 @@ async function topic(fp: string): Promise<number> {
   if (!topicOf.has(fp)) {
     const { members } = await lmk(["members"]);
     const intro = members.find((member: Json) => member.fp === fp)?.intro ?? "";
-    const created = await tg("createForumTopic", { chat_id: config.user, name: `${fp.slice(0, 4)} ${intro}`.slice(0, 128).trim() });
+    const created = await tg("createForumTopic", { chat_id: config.chat, name: `${fp.slice(0, 4)} ${intro}`.slice(0, 128).trim() });
     record({ fp, topic: created.message_thread_id });
   }
   return topicOf.get(fp)!;
 }
 
 async function fromLmk(event: Json): Promise<void> {
-  if (event.type !== "message") return void (await tg("sendMessage", { chat_id: config.user, text: JSON.stringify(event) }));
+  if (event.type !== "message") return void (await tg("sendMessage", { chat_id: config.chat, text: JSON.stringify(event) }));
   const { id, from, attachment, content = "" } = event;
   try {
     const request = attachment?.name.endsWith(".json") && JSON.parse(readFileSync(attachment.path, "utf8"));
@@ -77,10 +77,18 @@ async function fromLmk(event: Json): Promise<void> {
       ...(attachment ? [{ method: "sendDocument" }] : []),
     ];
     for (const { method, ...params } of calls) {
-      params.chat_id = config.user;
+      const document = !request && method === "sendDocument" ? attachment : undefined;
+      const own = params.message_thread_id === undefined;
+      params.chat_id = config.chat;
       params.message_thread_id ??= await topic(from);
       if (tgOf.has(event.reply_to)) params.reply_parameters ??= { message_id: tgOf.get(event.reply_to), allow_sending_without_reply: true };
-      const result = await tg(method, params, request ? undefined : method === "sendDocument" ? attachment : undefined);
+      const result = await tg(method, params, document).catch(async (error) => {
+        // The member's topic was deleted: it gets a new one.
+        if (!own || !/message thread not found/.test(error.message)) throw error;
+        topicOf.delete(from);
+        params.message_thread_id = await topic(from);
+        return tg(method, params, document);
+      });
       if (result?.message_id) record({ tg: result.message_id, lmk: id, fp: from });
       if (request) await lmk(["send"], JSON.stringify({ request: id, result }));
     }
@@ -92,7 +100,7 @@ async function fromLmk(event: Json): Promise<void> {
 async function fromTelegram(update: Json): Promise<void> {
   const query = update.callback_query;
   const message = update.message ?? query.message;
-  if (message.chat.id !== config.user) return;
+  if (message.chat.id !== config.chat || (query ?? message).from.id !== config.user) return;
   const media = !query && (message.document ?? message.photo?.at(-1) ?? message.video ?? message.audio ?? message.voice
     ?? message.animation ?? message.video_note ?? message.sticker);
   const content = query ? query.data : message.text ?? message.caption ?? "";
@@ -116,7 +124,7 @@ async function fromTelegram(update: Json): Promise<void> {
     else record({ tg: message.message_id, lmk: id });
   } catch (error) {
     await tg("sendMessage", {
-      chat_id: config.user,
+      chat_id: config.chat,
       message_thread_id: message.message_thread_id,
       text: String(error),
       reply_parameters: { message_id: message.message_id },

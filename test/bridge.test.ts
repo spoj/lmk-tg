@@ -11,10 +11,12 @@ import { after, before, test } from "node:test";
 
 type Json = Record<string, any>;
 
+const CHAT = -100;
 const USER = 7;
 const A = "aaaa000000000000";
 const dir = mkdtempSync(path.join(tmpdir(), "lmk-tg-test-"));
-const chat = { id: USER };
+const chat = { id: CHAT };
+const from = { id: USER };
 
 // What the bridge did, in order: its Bot API calls but getUpdates, as `{ tg: method, ...params }`, and its letmeknow
 // commands, as the fake reports them.
@@ -29,6 +31,8 @@ let poll: ((updates: Json[]) => void) | undefined;
 const updates: Json[] = [];
 let updateId = 0;
 let posted = 0;
+let topics = 0;
+const deleted = new Set<unknown>();
 let answered = 0;
 
 const server = createServer(async (req, res) => {
@@ -53,15 +57,17 @@ const server = createServer(async (req, res) => {
   const answer = (result: unknown) => res.end(JSON.stringify({ ok: true, result }));
   if (method === "getUpdates") return updates.length ? answer(updates.splice(0)) : void (poll = answer);
   did({ tg: method, ...params });
-  if (method === "fail") return res.end(JSON.stringify({ ok: false, description: "Bad Request: nope" }));
-  answer(method === "createForumTopic" ? { message_thread_id: 100 }
+  const refuse = (description: string) => res.end(JSON.stringify({ ok: false, description }));
+  if (method === "fail") return refuse("Bad Request: nope");
+  if (deleted.has(params.message_thread_id)) return refuse("Bad Request: message thread not found");
+  answer(method === "createForumTopic" ? { message_thread_id: 99 + ++topics }
     : method === "getFile" ? { file_path: "voice/file_1.oga" }
     : method.startsWith("send") ? { message_id: ++posted }
     : true);
 });
 
-function human(update: Json): void {
-  update.update_id = ++updateId;
+function human(fields: Json, kind = "message"): void {
+  const update = { update_id: ++updateId, [kind]: { chat, from, ...fields } };
   if (!poll) return void updates.push(update);
   poll([update]);
   poll = undefined;
@@ -80,7 +86,7 @@ let bridge: ChildProcess;
 function start(): void {
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   writeFileSync(path.join(dir, "config.json"), JSON.stringify({
-    token: "T", user: USER, session: "S", letmeknow: path.join(import.meta.dirname, "fake-letmeknow.mjs"), api: base,
+    token: "T", chat: CHAT, user: USER, session: "S", letmeknow: path.join(import.meta.dirname, "fake-letmeknow.mjs"), api: base,
   }));
   bridge = spawn(process.execPath, [path.join(import.meta.dirname, "../bridge.ts"), dir], { env: { ...process.env, FAKE: base, TMPDIR: dir }, stdio: "inherit" });
 }
@@ -100,26 +106,26 @@ after(() => {
 test("an agent's text opens its topic", async () => {
   await agent({ id: "m1", content: "hello" });
   assert.deepEqual(await next(), { lmk: ["--session", "S", "members"], text: "" });
-  assert.deepEqual(await next(), { tg: "createForumTopic", chat_id: USER, name: "aaaa Agent A" });
-  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: USER, message_thread_id: 100, text: "hello" });
+  assert.deepEqual(await next(), { tg: "createForumTopic", chat_id: CHAT, name: "aaaa Agent A" });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 100, text: "hello" });
 });
 
 test("a reply reaches the message's author as a reply", async () => {
-  human({ message: { message_id: 50, chat, message_thread_id: 100, text: "yes", reply_to_message: { message_id: 1 } } });
+  human({ message_id: 50, message_thread_id: 100, text: "yes", reply_to_message: { message_id: 1 } });
   assert.deepEqual(await next(), { lmk: sent("--reply-to", "m1", "--to", A), text: "yes" });
 });
 
 test("a message in a topic reaches its member, one outside every member", async () => {
-  human({ message: { message_id: 51, chat, message_thread_id: 100, text: "status?" } });
+  human({ message_id: 51, message_thread_id: 100, text: "status?" });
   assert.deepEqual(await next(), { lmk: sent("--to", A), text: "status?" });
-  human({ message: { message_id: 52, chat, text: "all stop" } });
+  human({ message_id: 52, text: "all stop" });
   assert.deepEqual(await next(), { lmk: sent("--urgent"), text: "all stop" });
 });
 
 test("an agent's reply to a human message replies to it", async () => {
   await agent({ id: "m2", content: "fine", reply_to: "h2" });
   assert.deepEqual(await next(), {
-    tg: "sendMessage", chat_id: USER, message_thread_id: 100, text: "fine",
+    tg: "sendMessage", chat_id: CHAT, message_thread_id: 100, text: "fine",
     reply_parameters: { message_id: 51, allow_sending_without_reply: true },
   });
 });
@@ -128,12 +134,12 @@ test("long text is split, and a file follows it", async () => {
   await agent({ id: "m3", content: "x".repeat(4097), attachment: file("log.txt", "log") });
   assert.equal((await next()).text, "x".repeat(4096));
   assert.equal((await next()).text, "x");
-  assert.deepEqual(await next(), { tg: "sendDocument", chat_id: "7", message_thread_id: "100", document: { name: "log.txt", content: "log" } });
+  assert.deepEqual(await next(), { tg: "sendDocument", chat_id: "-100", message_thread_id: "100", document: { name: "log.txt", content: "log" } });
 });
 
 test("a .json attachment is a Bot API call, whose result goes to no one and whose error to its sender", async () => {
   await agent({ id: "m4", content: "a poll", attachment: file("poll.json", JSON.stringify({ method: "sendPoll", chat_id: 1, question: "ok?", options: ["y", "n"] })) });
-  assert.deepEqual(await next(), { tg: "sendPoll", chat_id: USER, message_thread_id: 100, question: "ok?", options: ["y", "n"] });
+  assert.deepEqual(await next(), { tg: "sendPoll", chat_id: CHAT, message_thread_id: 100, question: "ok?", options: ["y", "n"] });
   assert.deepEqual(await next(), { lmk: sent(), text: JSON.stringify({ request: "m4", result: { message_id: 6 } }) });
   await agent({ id: "m5", attachment: file("fail.json", JSON.stringify({ method: "fail" })) });
   assert.equal((await next()).tg, "fail");
@@ -141,29 +147,39 @@ test("a .json attachment is a Bot API call, whose result goes to no one and whos
 });
 
 test("a button press reaches the author of its message", async () => {
-  human({ callback_query: { id: "q1", data: "yes", message: { message_id: 6, chat, message_thread_id: 100 } } });
+  human({ id: "q1", data: "yes", message: { message_id: 6, chat, message_thread_id: 100 } }, "callback_query");
   assert.deepEqual(await next(), { lmk: sent("--reply-to", "m4", "--to", A), text: "yes" });
   assert.deepEqual(await next(), { tg: "answerCallbackQuery", callback_query_id: "q1" });
 });
 
 test("a file arrives as an attachment", async () => {
-  human({ message: { message_id: 53, chat, message_thread_id: 100, voice: { file_id: "f1" } } });
+  human({ message_id: 53, message_thread_id: 100, voice: { file_id: "f1" } });
   assert.deepEqual(await next(), { tg: "getFile", file_id: "f1" });
   const call = await next();
   assert.equal(path.basename(call.lmk.at(-2)), "file_1.oga");
   assert.deepEqual({ ...call, lmk: call.lmk.toSpliced(-2, 1) }, { lmk: sent("--to", A, "--attach"), text: "", file: "voice bytes" });
 });
 
-test("service messages and other chats are dropped, and a failed send is reported", async () => {
+test("service messages, other chats and other senders are dropped, and a failed send is reported", async () => {
   await agent({ id: "gone", content: "bye" });
   assert.equal((await next()).text, "bye");
-  human({ message: { message_id: 54, chat, message_thread_id: 100, forum_topic_edited: { name: "renamed" } } });
-  human({ message: { message_id: 55, chat: { id: 8 }, text: "let me in" } });
-  human({ message: { message_id: 56, chat, message_thread_id: 100, text: "wait", reply_to_message: { message_id: 7 } } });
+  human({ message_id: 54, message_thread_id: 100, forum_topic_edited: { name: "renamed" } });
+  human({ message_id: 55, chat: { id: 8 }, text: "another chat" });
+  human({ message_id: 55, from: { id: 8 }, text: "another sender" });
+  human({ message_id: 56, message_thread_id: 100, text: "wait", reply_to_message: { message_id: 7 } });
   assert.deepEqual(await next(), { lmk: sent("--reply-to", "gone", "--to", A), text: "wait" });
   const report = await next();
   assert.match(report.text, /no message has an id that begins gone/);
-  assert.deepEqual({ ...report, text: "" }, { tg: "sendMessage", chat_id: USER, message_thread_id: 100, text: "", reply_parameters: { message_id: 56 } });
+  assert.deepEqual({ ...report, text: "" }, { tg: "sendMessage", chat_id: CHAT, message_thread_id: 100, text: "", reply_parameters: { message_id: 56 } });
+});
+
+test("a member whose topic was deleted gets a new one", async () => {
+  deleted.add(100);
+  await agent({ id: "m6", content: "moved" });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 100, text: "moved" });
+  assert.deepEqual(await next(), { lmk: ["--session", "S", "members"], text: "" });
+  assert.deepEqual(await next(), { tg: "createForumTopic", chat_id: CHAT, name: "aaaa Agent A" });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: "moved" });
 });
 
 test("topics and messages outlast a restart", async () => {
@@ -172,8 +188,8 @@ test("topics and messages outlast a restart", async () => {
   listener = Promise.withResolvers();
   poll = undefined;
   start();
-  human({ message: { message_id: 57, chat, message_thread_id: 100, text: "again", reply_to_message: { message_id: 1 } } });
+  human({ message_id: 57, message_thread_id: 101, text: "again", reply_to_message: { message_id: 1 } });
   assert.deepEqual(await next(), { lmk: sent("--reply-to", "m1", "--to", A), text: "again" });
-  await agent({ id: "m6", content: "back" });
-  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: USER, message_thread_id: 100, text: "back" });
+  await agent({ id: "m7", content: "back" });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: "back" });
 });

@@ -1,8 +1,8 @@
 # lmk-tg
 
-Bridges one [letmeknow](https://letmeknow.dev) group and one person's private Telegram chat with a bot. The bridge is a member of the group; to the other members it is that person.
+Bridges one [letmeknow](https://letmeknow.dev) group and one person's Telegram chat with a bot. The bridge is a member of the group; to the other members it is that person.
 
-Each member that reaches the person gets a topic in the chat, named by its fingerprint's first four digits and its intro.
+Each member that reaches the person gets a topic in the chat, named by its fingerprint's first four digits and its intro, and a new one with its next message once that is deleted.
 
 ## For members of the group
 
@@ -25,7 +25,9 @@ From Telegram:
 
 Requires Node.js 24+.
 
-1. Make a bot with @BotFather. In BotFather's Mini App, under the bot's Bot Settings → Threads Settings, turn on Threaded Mode. Start a chat with the bot.
+1. Make a bot with @BotFather, and give it a chat with topics, either:
+   - its private chat with the person: in BotFather's Mini App, under the bot's Bot Settings → Threads Settings, turn on Threaded Mode, and start a chat with the bot; or
+   - a group with Topics on, where the bot is an admin that may manage topics.
 2. Start a letmeknow session, join it to the group and to no other, set its intro, and stop it:
 
    ```sh
@@ -39,7 +41,8 @@ Requires Node.js 24+.
    | Key | Meaning |
    |---|---|
    | `token` | Bot token |
-   | `user` | The person's Telegram user ID; updates from other chats are dropped |
+   | `chat` | The chat's ID; a private chat's is the person's user ID |
+   | `user` | The person's Telegram user ID; updates from other senders and chats are dropped |
    | `session` | The session's fingerprint |
    | `letmeknow` | Command that runs letmeknow, e.g. `npx -y @letmeknow/cli@0.25` |
    | `api` | Bot API server, `https://api.telegram.org` by default |
