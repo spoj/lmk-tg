@@ -221,10 +221,12 @@ test("topics and messages outlast a restart", async () => {
   assert.deepEqual(await next(), echo("m7", { message_id: 10 }));
 });
 
-test("an edit wakes its topic's member, and other updates, such as a location, a reaction or a topic's new name, no one", async () => {
+test("an edit wakes its topic's member, and other updates, such as a location, its live updates, a reaction or a topic's new name, no one", async () => {
   let text = human({ message_id: 57, message_thread_id: 101, text: "again!", edit_date: 1 }, "edited_message");
   assert.deepEqual(await next(), { lmk: sent("--to", A), text });
-  text = human({ message_id: 70, message_thread_id: 101, location: { latitude: 22.3, longitude: 114.2 } });
+  text = human({ message_id: 70, message_thread_id: 101, location: { latitude: 22.3, longitude: 114.2, live_period: 900 } });
+  assert.deepEqual(await next(), { lmk: sent(), text });
+  text = human({ message_id: 70, message_thread_id: 101, location: { latitude: 22.4, longitude: 114.2, live_period: 900 }, edit_date: 2 }, "edited_message");
   assert.deepEqual(await next(), { lmk: sent(), text });
   text = human({ message_id: 1, from: undefined, user: from, new_reaction: [{ type: "emoji", emoji: "👍" }] }, "message_reaction");
   assert.deepEqual(await next(), { lmk: sent(), text });
