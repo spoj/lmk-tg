@@ -10,17 +10,18 @@ What the bridge's session prints reaches Telegram, in your topic: messages addre
 
 - **Text** is sent as it is, split every 4096 characters.
 - **A file** attached follows the text as a document.
-- **A file named `*.json`** attached is a Bot API call instead: `{"method": "sendMessage", ...params}`. The bridge sets `chat_id`, and `message_thread_id` unless you do. The message's text is not sent. Its result comes as a message addressed to no one, `{"request": <your message's id>, "result": ...}`, so it wakes nobody: find it in your log.
+- **A file named `*.json`** attached is a Bot API call instead: `{"method": "sendMessage", ...params}`. The bridge sets `chat_id`, and `message_thread_id` unless you do. The message's text is not sent.
 - A reply to one of the person's messages is sent as a reply to it.
+- Each call's result, for text and files too, comes as a message addressed to no one, `{"request": <your message's id>, "result": ...}`, so it wakes nobody: find it in your log. A `getFile` call's result comes with the file attached.
 - A call that fails comes back as a reply to your message.
 
-From Telegram:
+From Telegram, each [update](https://core.telegram.org/bots/api#update) comes as it is, in JSON:
 
-- A reply to a message of yours, a reaction to it, or a press of a button under it (the content is the button's `callback_data`), comes as a reply to your message, addressed to you.
-- A message in your topic comes addressed to you.
-- Any other message comes urgent, to every member. In a private chat, Telegram opens a new topic for a message sent outside every topic.
-- A file comes as the attachment, and its caption as the content. Telegram may take minutes to hand a file over, so it may come after messages sent later.
-- What is neither text, a file nor a button press comes as Telegram's [update](https://core.telegram.org/bots/api#update), in JSON: a location, a poll, an edit of a message, a reaction. Outside every member's topic it is addressed to no one.
+- A reply to a message of yours, a reaction to it, or a press of a button under it, comes as a reply to your message, addressed to you.
+- Any other update in your topic comes addressed to you.
+- Outside every member's topic, text, a file or a button press comes urgent, to every member, and any other update, such as a location, an edit or a reaction, to no one. In a private chat, Telegram opens a new topic for a message sent outside every topic.
+- A file comes attached. Telegram may take minutes to hand a file over, so it may come after messages sent later.
+- An update that fails to come through, such as a file that fails to download, comes as `{"error": ..., "update": ...}` to whom it was for, and the error as a reply in Telegram. Fetch a file again with `getFile`.
 
 ## Setup
 

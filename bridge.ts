@@ -71,6 +71,7 @@ async function topic(fp: string): Promise<number> {
 async function fromLmk(event: Json): Promise<void> {
   if (event.type !== "message") return void (await tg("sendMessage", { chat_id: config.chat, text: JSON.stringify(event) }));
   const { id, from, attachment, content = "" } = event;
+  const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
   try {
     const request = attachment?.name.endsWith(".json") && JSON.parse(readFileSync(attachment.path, "utf8"));
     const calls: Json[] = request ? [request] : [
@@ -91,10 +92,19 @@ async function fromLmk(event: Json): Promise<void> {
         return tg(method, params, document);
       });
       if (result?.message_id) record({ tg: result.message_id, lmk: id, fp: from });
-      if (request) await lmk(["send"], JSON.stringify({ request: id, result }));
+      // getFile's result brings the file with it.
+      const file = result?.file_path && path.join(temp, path.basename(result.file_path));
+      if (file) {
+        const response = await fetch(`${root}/file/bot${config.token}/${result.file_path}`);
+        if (!response.ok) throw new Error(`file download: HTTP ${response.status}`);
+        await writeFile(file, Buffer.from(await response.arrayBuffer()));
+      }
+      await lmk(["send", ...(file ? ["--attach", file] : [])], JSON.stringify({ request: id, result }));
     }
   } catch (error) {
     await lmk(["send", "--reply-to", id, "--to", from], String(error));
+  } finally {
+    await rm(temp, { recursive: true });
   }
 }
 
@@ -106,15 +116,14 @@ async function fromTelegram(update: Json): Promise<void> {
   const fresh = kind === "message";
   const media = fresh && (message.document ?? message.photo?.at(-1) ?? message.video ?? message.audio ?? message.voice
     ?? message.animation ?? message.video_note ?? message.sticker);
-  const text = query ? query.data : fresh ? message.text ?? message.caption : undefined;
-  // What is neither text, a file nor a button press comes as Telegram's update, to no one outside every member's topic.
-  const raw = text === undefined && !media;
-  const content = raw ? JSON.stringify(update) : text ?? "";
   const origin = lmkOf.get((fresh ? message.reply_to_message : message)?.message_id);
-  const member = [...topicOf].find(([, thread]) => thread === message.message_thread_id)?.[0];
-  const args = origin?.fp ? ["--reply-to", origin.lmk, "--to", origin.fp] : member ? ["--to", member] : raw ? [] : ["--urgent"];
+  const member = origin?.fp ?? [...topicOf].find(([, thread]) => thread === message.message_thread_id)?.[0];
+  // Outside every member's topic, what the person says, sends or presses goes urgent to every member; other updates to no one.
+  const said = query || media || (fresh && (message.text ?? message.caption) !== undefined);
+  const to = member ? ["--to", member] : said ? ["--urgent"] : [];
   const forward = async () => {
     const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
+    const args = [...(origin?.fp ? ["--reply-to", origin.lmk] : []), ...to];
     try {
       if (media) {
         const { file_path } = await tg("getFile", { file_id: media.file_id });
@@ -124,7 +133,7 @@ async function fromTelegram(update: Json): Promise<void> {
         await writeFile(target, Buffer.from(await response.arrayBuffer()));
         args.push("--attach", target);
       }
-      const { id } = await lmk(["send", ...args], content);
+      const { id } = await lmk(["send", ...args], JSON.stringify(update));
       if (query) await tg("answerCallbackQuery", { callback_query_id: query.id });
       else if (fresh) record({ tg: message.message_id, lmk: id });
     } catch (error) {
@@ -134,6 +143,7 @@ async function fromTelegram(update: Json): Promise<void> {
         text: String(error),
         reply_parameters: { message_id: message.message_id },
       });
+      await lmk(["send", ...to], JSON.stringify({ error: String(error), update }));
     } finally {
       await rm(temp, { recursive: true });
     }
