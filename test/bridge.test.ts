@@ -221,13 +221,15 @@ test("topics and messages outlast a restart", async () => {
   assert.deepEqual(await next(), echo("m7", { message_id: 10 }));
 });
 
-test("what is neither text, a file nor a button press goes to its topic's member or its message's author, else to no one", async () => {
-  let text = human({ message_id: 70, message_thread_id: 101, location: { latitude: 22.3, longitude: 114.2 } });
+test("an edit wakes its topic's member, and other updates, such as a location, a reaction or a topic's new name, no one", async () => {
+  let text = human({ message_id: 57, message_thread_id: 101, text: "again!", edit_date: 1 }, "edited_message");
   assert.deepEqual(await next(), { lmk: sent("--to", A), text });
-  text = human({ message_id: 57, message_thread_id: 101, text: "again!", edit_date: 1 }, "edited_message");
-  assert.deepEqual(await next(), { lmk: sent("--to", A), text });
+  text = human({ message_id: 70, message_thread_id: 101, location: { latitude: 22.3, longitude: 114.2 } });
+  assert.deepEqual(await next(), { lmk: sent(), text });
   text = human({ message_id: 1, from: undefined, user: from, new_reaction: [{ type: "emoji", emoji: "👍" }] }, "message_reaction");
-  assert.deepEqual(await next(), { lmk: sent("--reply-to", "m1", "--to", A), text });
+  assert.deepEqual(await next(), { lmk: sent(), text });
+  text = human({ message_id: 72, message_thread_id: 101, forum_topic_edited: { name: "renamed" } });
+  assert.deepEqual(await next(), { lmk: sent(), text });
   text = human({ message_id: 71, forum_topic_created: { name: "new" } });
   assert.deepEqual(await next(), { lmk: sent(), text });
 });

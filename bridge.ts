@@ -118,12 +118,13 @@ async function fromTelegram(update: Json): Promise<void> {
     ?? message.animation ?? message.video_note ?? message.sticker);
   const origin = lmkOf.get((fresh ? message.reply_to_message : message)?.message_id);
   const member = origin?.fp ?? [...topicOf].find(([, thread]) => thread === message.message_thread_id)?.[0];
-  // Outside every member's topic, what the person says, sends or presses goes urgent to every member; other updates to no one.
-  const said = query || media || (fresh && (message.text ?? message.caption) !== undefined);
+  // What the person writes, sends, presses or edits wakes its member, or outside every member's topic every member;
+  // other updates, such as reactions and a topic's new name, wake no one. A failure wakes whom its update concerns.
+  const said = query || media || (message.text ?? message.caption) !== undefined;
   const to = member ? ["--to", member] : said ? ["--urgent"] : [];
   const forward = async () => {
     const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
-    const args = [...(origin?.fp ? ["--reply-to", origin.lmk] : []), ...to];
+    const args = said ? [...(origin?.fp ? ["--reply-to", origin.lmk] : []), ...to] : [];
     try {
       if (media) {
         const { file_path } = await tg("getFile", { file_id: media.file_id });
