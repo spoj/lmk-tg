@@ -51,7 +51,9 @@ Requires Node.js 24+.
 
 4. Run `node bridge.ts <state directory>`. `deploy/lmk-tg.service` is a systemd user unit for `~/.local/share/lmk-tg`; under it the letmeknow session stops with the bridge.
 
-`state.jsonl` in the state directory maps Telegram messages to letmeknow messages, and members to topics.
+`state.jsonl` in the state directory maps Telegram messages to letmeknow messages and members to topics. It also journals incoming Telegram updates and their completion, restoring the polling cursor and replaying unfinished updates (including slow downloads) after restart. Existing mapping entries remain readable. The file is mode 600 and append-only: completed updates' raw JSON remains in it.
+
+Delivery is not exactly-once: a crash after a remote send but before its completion is recorded can duplicate an update. Outgoing letmeknow events are not durably queued by the bridge; a crash or Bot API failure can interrupt a multi-part delivery.
 
 ## Checks
 

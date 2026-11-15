@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -37,6 +37,8 @@ let topics = 0;
 const deleted = new Set<unknown>();
 let answered = 0;
 let held: Promise<void> | undefined;
+let lastOffset = 0;
+let waitForPoll: { offset: number; resolve: () => void } | undefined;
 
 const server = createServer(async (req, res) => {
   const url = req.url!;
@@ -58,7 +60,11 @@ const server = createServer(async (req, res) => {
   if (req.headers["content-type"] === "application/json") params = await request.json() as Json;
   else for (const [key, value] of await request.formData()) params[key] = typeof value === "string" ? value : { name: value.name, content: await value.text() };
   const answer = (result: unknown) => res.end(JSON.stringify({ ok: true, result }));
-  if (method === "getUpdates") return updates.length ? answer(updates.splice(0)) : void (poll = answer);
+  if (method === "getUpdates") {
+    lastOffset = params.offset;
+    if (lastOffset === waitForPoll?.offset) waitForPoll.resolve();
+    return updates.length ? answer(updates.splice(0)) : void (poll = answer);
+  }
   did({ tg: method, ...params });
   const refuse = (description: string) => res.end(JSON.stringify({ ok: false, description }));
   if (method === "fail" || params.reply_parameters?.message_id === 82) return refuse("Bad Request: nope");
@@ -268,4 +274,56 @@ test("a failed Telegram error reply does not suppress the group's error report",
   const error = "Error: file download: HTTP 404";
   assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: error, reply_parameters: { message_id: 82 } });
   assert.deepEqual(await next(), { lmk: sent("--to", A), text: JSON.stringify({ error, update: JSON.parse(update) }) });
+});
+
+test("a slow file survives a restart after Telegram has acknowledged its update", { timeout: 5000 }, async () => {
+  const file = Promise.withResolvers<void>();
+  held = file.promise;
+  const update = human({ message_id: 83, message_thread_id: 101, voice: { file_id: "f3" } });
+  assert.deepEqual(await next(), { tg: "getFile", file_id: "f3" });
+  const text = human({ message_id: 84, message_thread_id: 101, text: "while downloading" });
+  const polled = Promise.withResolvers<void>();
+  waitForPoll = { offset: updateId + 1, resolve: polled.resolve };
+  assert.deepEqual(await next(), { lmk: sent("--to", A), text });
+  await polled.promise;
+  assert.ok(lastOffset > JSON.parse(update).update_id);
+  const exited = new Promise((resolve) => bridge.once("exit", resolve));
+  bridge.kill();
+  (await listener.promise).end();
+  await exited;
+  listener = Promise.withResolvers();
+  poll = undefined;
+  start();
+  assert.deepEqual(await next(), { tg: "getFile", file_id: "f3" });
+  file.resolve();
+  held = undefined;
+  const call = await next();
+  assert.equal(path.basename(call.lmk.at(-2)), "f3.oga");
+  assert.deepEqual({ ...call, lmk: call.lmk.toSpliced(-2, 1) }, { lmk: sent("--to", A, "--attach"), text: update, file: "voice bytes" });
+});
+
+test("completed updates stay completed and the polling cursor and private state survive a restart", { timeout: 5000 }, async () => {
+  const text = human({ message_id: 85, message_thread_id: 101, text: "download finished" });
+  const polled = Promise.withResolvers<void>();
+  waitForPoll = { offset: updateId + 1, resolve: polled.resolve };
+  assert.deepEqual(await next(), { lmk: sent("--to", A), text });
+  await polled.promise;
+  assert.equal(statSync(path.join(dir, "state.jsonl")).mode & 0o777, 0o600);
+  chmodSync(path.join(dir, "state.jsonl"), 0o644);
+  const exited = new Promise((resolve) => bridge.once("exit", resolve));
+  bridge.kill();
+  (await listener.promise).end();
+  await exited;
+  listener = Promise.withResolvers();
+  poll = undefined;
+  lastOffset = 0;
+  const resumed = Promise.withResolvers<void>();
+  waitForPoll = { offset: updateId + 1, resolve: resumed.resolve };
+  start();
+  await resumed.promise;
+  assert.equal(lastOffset, updateId + 1);
+  assert.equal(statSync(path.join(dir, "state.jsonl")).mode & 0o777, 0o600);
+  await agent({ id: "m9", content: "after download" });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: "after download" });
+  assert.deepEqual(await next(), echo("m9", { message_id: posted }));
 });

@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { appendFileSync, existsSync, openAsBlob, readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, openAsBlob, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 type Json = Record<string, any>;
 // A Telegram message that carries a letmeknow message, with that one's author unless it is the bridge; or a member's topic.
-type Entry = { tg: number; lmk: string; fp?: string } | { topic: number; fp: string };
+type Entry = { tg: number; lmk: string; fp?: string } | { topic: number; fp: string } | { update: Json } | { done: number };
 
 const dir = process.argv[2];
 const config: { token: string; chat: number; user: number; session: string; letmeknow: string; api?: string } =
@@ -20,8 +20,16 @@ const statePath = path.join(dir, "state.jsonl");
 const lmkOf = new Map<number, { lmk: string; fp?: string }>();
 const tgOf = new Map<string, number>();
 const topicOf = new Map<string, number>();
+const pending = new Map<number, Json>();
+let offset = 0;
 
 function apply(entry: Entry): void {
+  if ("update" in entry) {
+    pending.set(entry.update.update_id, entry.update);
+    offset = entry.update.update_id + 1;
+    return;
+  }
+  if ("done" in entry) return void pending.delete(entry.done);
   if ("topic" in entry) return void topicOf.set(entry.fp, entry.topic);
   lmkOf.set(entry.tg, entry);
   if (!entry.fp) tgOf.set(entry.lmk, entry.tg);
@@ -29,7 +37,7 @@ function apply(entry: Entry): void {
 
 function record(entry: Entry): void {
   apply(entry);
-  appendFileSync(statePath, `${JSON.stringify(entry)}\n`);
+  appendFileSync(statePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 }
 
 async function tg(method: string, params: Json, document?: { path: string; name: string }): Promise<any> {
@@ -122,6 +130,7 @@ async function fromTelegram(update: Json): Promise<void> {
   // other updates, such as reactions and a topic's new name, wake no one. A failure wakes whom its update concerns.
   const said = query || media || (message.text ?? message.caption) !== undefined;
   const to = member ? ["--to", member] : said ? ["--urgent"] : [];
+  if (!pending.has(update.update_id)) record({ update });
   const forward = async () => {
     const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
     const args = said ? [...(origin?.fp ? ["--reply-to", origin.lmk] : []), ...to] : [];
@@ -137,6 +146,7 @@ async function fromTelegram(update: Json): Promise<void> {
       const { id } = await lmk(["send", ...args], JSON.stringify(update));
       if (query) await tg("answerCallbackQuery", { callback_query_id: query.id });
       else if (fresh) record({ tg: message.message_id, lmk: id });
+      record({ done: update.update_id });
     } catch (error) {
       try {
         await tg("sendMessage", {
@@ -147,6 +157,7 @@ async function fromTelegram(update: Json): Promise<void> {
         });
       } finally {
         await lmk(["send", ...to], JSON.stringify({ error: String(error), update }));
+        record({ done: update.update_id });
       }
     } finally {
       await rm(temp, { recursive: true });
@@ -157,7 +168,10 @@ async function fromTelegram(update: Json): Promise<void> {
   else await forward();
 }
 
-if (existsSync(statePath)) for (const line of readFileSync(statePath, "utf8").split("\n")) if (line) apply(JSON.parse(line));
+if (existsSync(statePath)) {
+  chmodSync(statePath, 0o600);
+  for (const line of readFileSync(statePath, "utf8").split("\n")) if (line) apply(JSON.parse(line));
+}
 
 const [command, ...prefix] = config.letmeknow.split(" ");
 const listen = spawn(command, [...prefix, "--session", config.session, "listen"], { stdio: ["ignore", "pipe", "inherit"] });
@@ -169,7 +183,9 @@ void (async () => {
   for await (const line of lines) await fromLmk(JSON.parse(line)).catch(console.error);
 })();
 
-for (let offset = 0; ;) {
+for (const update of pending.values()) await fromTelegram(update).catch(console.error);
+
+for (;;) {
   const updates: Json[] = await tg("getUpdates", { offset, timeout: 50, allowed_updates: ["message", "edited_message", "callback_query", "message_reaction"] })
     .catch(async (error) => {
       console.error(error);
