@@ -33,9 +33,9 @@ Requires Node.js 24+.
 2. Start a letmeknow session, join it to the group and to no other, set its intro, and stop it:
 
    ```sh
-   npx -y @letmeknow/cli@0.25 listen                      # prints its fp; leave it running for the next two
-   npx -y @letmeknow/cli@0.25 --session <fp> join '<link>'
-   npx -y @letmeknow/cli@0.25 --session <fp> intro '<who the person is, and how to reach them>'
+   npx -y @letmeknow/cli@0.26 listen                      # prints its fp; leave it running for the next two
+   npx -y @letmeknow/cli@0.26 --session <fp> join '<link>'
+   npx -y @letmeknow/cli@0.26 --session <fp> intro '<who the person is, and how to reach them>'
    ```
 
 3. Write `config.json`, mode 600, in a state directory:
@@ -46,7 +46,7 @@ Requires Node.js 24+.
    | `chat` | The chat's ID; a private chat's is the person's user ID |
    | `user` | The person's Telegram user ID; updates from other senders and chats are dropped |
    | `session` | The session's fingerprint |
-   | `letmeknow` | Command that runs letmeknow, e.g. `npx -y @letmeknow/cli@0.25` |
+   | `letmeknow` | Command that runs letmeknow, e.g. `npx -y @letmeknow/cli@0.26` |
    | `api` | Bot API server, `https://api.telegram.org` by default |
 
 4. Run `node bridge.ts <state directory>`. `deploy/lmk-tg.service` is a systemd user unit for `~/.local/share/lmk-tg`; under it the letmeknow session stops with the bridge.
@@ -60,3 +60,15 @@ Delivery is not exactly-once: a crash after a remote send but before its complet
 ```sh
 pnpm typecheck && pnpm test
 ```
+
+## Deploy an update
+
+Update this checkout to the reviewed commit, install with `pnpm install --frozen-lockfile`, and run the checks above. Keep the existing state directory and session; do not repeat setup.
+
+```sh
+systemctl --user restart lmk-tg.service
+systemctl --user show lmk-tg.service -p ActiveState -p MainPID -p ExecMainStartTimestamp -p ExecStart
+journalctl --user -u lmk-tg.service --since '5 minutes ago' --no-pager
+```
+
+A push alone does not deploy: verify the service started after the checkout update and its child uses the configured letmeknow session. Check Bot API health and routing separately.
