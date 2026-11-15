@@ -1,16 +1,37 @@
 #!/usr/bin/env node
-// Stands in for letmeknow: `listen` prints `ready` and then what the test serves at /events; any other command is
-// answered by the test at /call, which gets its arguments, its stdin, and the content of a file it attaches.
-import { readFileSync } from "node:fs";
+// Stands in for letmeknow: `listen` logs full events to `ready.log` and prints `ready` plus 8 KiB-cut events from /events;
+// any other command is answered by the test at /call, which gets its arguments, its stdin, and any attached file's content.
+import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createInterface } from "node:readline";
+import { Readable } from "node:stream";
 import { text } from "node:stream/consumers";
 import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 if (args.includes("listen")) {
-  console.log(JSON.stringify({ type: "ready", bin: fileURLToPath(import.meta.url) }));
+  const log = path.join(mkdtempSync(path.join(tmpdir(), "lmk-fake-")), "log.jsonl");
+  console.log(JSON.stringify({ type: "ready", bin: fileURLToPath(import.meta.url), log }));
   const events = await fetch(`${process.env.FAKE}/events`);
   try {
-    for await (const chunk of events.body) process.stdout.write(chunk);
+    for await (const line of createInterface({ input: Readable.fromWeb(events.body) })) {
+      if (!line) continue;
+      let out = line;
+      try {
+        const event = JSON.parse(line);
+        appendFileSync(log, `${line}\n`, { mode: 0o600 });
+        if (event.type === "message" && typeof event.content === "string") {
+          const bytes = Buffer.from(event.content, "utf8");
+          if (bytes.length > 8192) {
+            let end = 8192;
+            while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+            out = JSON.stringify({ ...event, content: bytes.subarray(0, end).toString("utf8"), truncated: true });
+          }
+        }
+      } catch {}
+      console.log(out);
+    }
   } catch {
     // The test ended the stream.
   }

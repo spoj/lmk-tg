@@ -68,10 +68,15 @@ const server = createServer(async (req, res) => {
   did({ tg: method, ...params });
   const refuse = (description: string) => res.end(JSON.stringify({ ok: false, description }));
   if (method === "fail" || params.reply_parameters?.message_id === 82) return refuse("Bad Request: nope");
+  if (method === "sendMessage" && (typeof params.text !== "string" || !params.text.trim())) return refuse("Bad Request: message text is empty");
+  if (method === "sendMessage" && [...params.text].length > 4096) return refuse("Bad Request: message is too long");
+  if (method === "answerCallbackQuery" && params.callback_query_id === "expired") return refuse("Bad Request: query is too old");
   if (method === "getFile") await held;
-  if (deleted.has(params.message_thread_id)) return refuse("Bad Request: message thread not found");
+  if (deleted.has(Number(params.message_thread_id))) return refuse("Bad Request: message thread not found");
   answer(method === "createForumTopic" ? { message_thread_id: 99 + ++topics }
     : method === "getFile" ? { file_path: `voice/${params.file_id}.oga` }
+    : method === "sendMediaGroup" ? params.media.map(() => ({ message_id: ++posted }))
+    : method === "sendPoll" && params.is_anonymous === false ? { message_id: ++posted, poll: { id: "poll-1" } }
     : method.startsWith("send") ? { message_id: ++posted }
     : true);
 });
@@ -200,7 +205,7 @@ test("other chats and other senders are dropped, and a failed send is reported i
   assert.deepEqual(await next(), { lmk: sent("--reply-to", "gone", "--to", A), text: update });
   const reply = await next();
   assert.match(reply.text, /no message has an id that begins gone/);
-  assert.deepEqual({ ...reply, text: "" }, { tg: "sendMessage", chat_id: CHAT, message_thread_id: 100, text: "", reply_parameters: { message_id: 56 } });
+  assert.deepEqual({ ...reply, text: "" }, { tg: "sendMessage", chat_id: CHAT, message_thread_id: 100, text: "", reply_parameters: { message_id: 56, allow_sending_without_reply: true } });
   assert.deepEqual(await next(), { lmk: sent("--to", A), text: JSON.stringify({ error: reply.text, update: JSON.parse(update) }) });
 });
 
@@ -259,7 +264,7 @@ test("a file that fails to come through reaches its member as the error, and get
   const update = human({ message_id: 80, message_thread_id: 101, voice: { file_id: "lost" } });
   assert.deepEqual(await next(), { tg: "getFile", file_id: "lost" });
   const error = "Error: file download: HTTP 404";
-  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: error, reply_parameters: { message_id: 80 } });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: error, reply_parameters: { message_id: 80, allow_sending_without_reply: true } });
   assert.deepEqual(await next(), { lmk: sent("--to", A), text: JSON.stringify({ error, update: JSON.parse(update) }) });
   await agent({ id: "m8", attachment: file("get.json", JSON.stringify({ method: "getFile", file_id: "f1" })) });
   assert.deepEqual(await next(), { tg: "getFile", file_id: "f1", chat_id: CHAT, message_thread_id: 101 });
@@ -272,7 +277,7 @@ test("a failed Telegram error reply does not suppress the group's error report",
   const update = human({ message_id: 82, message_thread_id: 101, voice: { file_id: "lost" } });
   assert.deepEqual(await next(), { tg: "getFile", file_id: "lost" });
   const error = "Error: file download: HTTP 404";
-  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: error, reply_parameters: { message_id: 82 } });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: error, reply_parameters: { message_id: 82, allow_sending_without_reply: true } });
   assert.deepEqual(await next(), { lmk: sent("--to", A), text: JSON.stringify({ error, update: JSON.parse(update) }) });
 });
 
@@ -342,4 +347,108 @@ test("completed updates stay completed and the polling cursor and private state 
   await agent({ id: "m9", content: "after download" });
   assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: "after download" });
   assert.deepEqual(await next(), echo("m9", { message_id: posted }));
+});
+
+test("messages truncated at 8 KiB by letmeknow listen are delivered whole from its log, and trailing whitespace chunks do not break attachments", { timeout: 3000 }, async () => {
+  const full = "漢".repeat(3000);
+  await agent({ id: "m10", content: full });
+  const cjk = await next();
+  assert.equal(cjk.tg, "sendMessage");
+  assert.equal(cjk.text, full);
+  assert.deepEqual(await next(), echo("m10", { message_id: posted }));
+
+  await agent({ id: "m11", content: `${"y".repeat(4096)}\n`, attachment: file("note.txt", "attached") });
+  assert.equal((await next()).text, "y".repeat(4096));
+  assert.deepEqual(await next(), echo("m11", { message_id: posted }));
+  assert.deepEqual(await next(), { tg: "sendDocument", chat_id: "-100", message_thread_id: "101", document: { name: "note.txt", content: "attached" } });
+  assert.deepEqual(await next(), echo("m11", { message_id: posted }));
+});
+
+test("cross-topic external_reply, native media groups, non-anonymous poll answers, and replies to edited messages preserve correlation", { timeout: 3000 }, async () => {
+  const cross = human({
+    message_id: 90,
+    message_thread_id: 101,
+    reply_to_message: { message_id: 101, forum_topic_created: { name: "aaaa" } },
+    external_reply: { chat, message_id: 11 },
+    text: "cross-topic via external_reply",
+  });
+  assert.deepEqual(await next(), { lmk: sent("--reply-to", "b1", "--to", B), text: cross });
+
+  const foreign = human({
+    message_id: 91,
+    message_thread_id: 101,
+    external_reply: { chat: { id: -999 }, message_id: 11 },
+    text: "other chat external_reply",
+  });
+  assert.deepEqual(await next(), { lmk: sent("--to", A), text: foreign });
+
+  await agent({
+    id: "album1",
+    from: B,
+    attachment: file("album.json", JSON.stringify({ method: "sendMediaGroup", message_thread_id: 101, media: [{ type: "photo", media: "p1" }, { type: "photo", media: "p2" }] })),
+  });
+  assert.equal((await next()).tg, "sendMediaGroup");
+  const albumSecondId = posted;
+  assert.deepEqual(await next(), echo("album1", [{ message_id: albumSecondId - 1 }, { message_id: albumSecondId }]));
+  const albumReply = human({ message_id: 92, message_thread_id: 101, text: "nice album", reply_to_message: { message_id: albumSecondId } });
+  assert.deepEqual(await next(), { lmk: sent("--reply-to", "album1", "--to", B), text: albumReply });
+
+  await agent({
+    id: "poll1",
+    from: B,
+    attachment: file("openpoll.json", JSON.stringify({ method: "sendPoll", is_anonymous: false, question: "pick", options: ["a", "b"] })),
+  });
+  assert.equal((await next()).tg, "sendPoll");
+  assert.deepEqual(await next(), echo("poll1", { message_id: posted, poll: { id: "poll-1" } }));
+  const voteUpdate = { update_id: ++updateId, poll_answer: { poll_id: "poll-1", user: from, option_ids: [1] } };
+  if (!poll) updates.push(voteUpdate); else { poll([voteUpdate]); poll = undefined; }
+  assert.deepEqual(await next(), { lmk: sent("--reply-to", "poll1", "--to", B), text: JSON.stringify(voteUpdate) });
+
+  const editPolled = Promise.withResolvers<void>();
+  const editText = human({ message_id: 91, message_thread_id: 101, text: "edited human msg", edit_date: 4 }, "edited_message");
+  waitForPoll = { offset: updateId + 1, resolve: editPolled.resolve };
+  const editCall = await next();
+  assert.deepEqual(editCall, { lmk: sent("--to", A), text: editText });
+  await editPolled.promise;
+  await agent({ id: "m12", content: "replying to edit", reply_to: `h${answered}` });
+  assert.deepEqual(await next(), {
+    tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: "replying to edit",
+    reply_parameters: { message_id: 91, allow_sending_without_reply: true },
+  });
+  assert.deepEqual(await next(), echo("m12", { message_id: posted }));
+});
+
+test("captionless media edits wake and attach, empty filenames fall back to file_path, and expired callback acknowledgements do not double-wake", { timeout: 3000 }, async () => {
+  const mediaEdit = human({ message_id: 93, message_thread_id: 101, photo: [{ file_id: "f-edit" }], edit_date: 5 }, "edited_message");
+  assert.deepEqual(await next(), { tg: "getFile", file_id: "f-edit" });
+  const editAttach = await next();
+  assert.equal(path.basename(editAttach.lmk.at(-2)), "f-edit.oga");
+  assert.deepEqual({ ...editAttach, lmk: editAttach.lmk.toSpliced(-2, 1) }, { lmk: sent("--to", A, "--attach"), text: mediaEdit, file: "voice bytes" });
+
+  const emptyName = human({ message_id: 94, message_thread_id: 101, document: { file_id: "f-doc", file_name: "" } });
+  assert.deepEqual(await next(), { tg: "getFile", file_id: "f-doc" });
+  const docAttach = await next();
+  assert.equal(path.basename(docAttach.lmk.at(-2)), "f-doc.oga");
+  assert.deepEqual({ ...docAttach, lmk: docAttach.lmk.toSpliced(-2, 1) }, { lmk: sent("--to", A, "--attach"), text: emptyName, file: "voice bytes" });
+
+  const expiredCb = human({ id: "expired", data: "ok", message: { message_id: 1, chat, message_thread_id: 101 } }, "callback_query");
+  assert.deepEqual(await next(), { lmk: sent("--reply-to", "m1", "--to", A), text: expiredCb });
+  assert.deepEqual(await next(), { tg: "answerCallbackQuery", callback_query_id: "expired" });
+
+  await agent({ id: "nulljson", content: "must stay suppressed", attachment: file("null.json", "null") });
+  const nullErr = await next();
+  assert.deepEqual(nullErr.lmk, sent("--reply-to", "nulljson", "--to", A));
+  assert.match(nullErr.text, /invalid Bot API/);
+
+  await agent({ id: "nullthread", attachment: file("top.json", JSON.stringify({ method: "sendMessage", message_thread_id: null, text: "general" })) });
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, text: "general" });
+  assert.deepEqual(await next(), echo("nullthread", { message_id: posted }));
+
+  const bigWarning = { type: "warning", text: "w".repeat(4200) };
+  (await listener.promise).write(`${JSON.stringify(bigWarning)}\n`);
+  const chunk1 = await next();
+  const chunk2 = await next();
+  assert.equal(chunk1.tg, "sendMessage");
+  assert.equal(chunk2.tg, "sendMessage");
+  assert.equal(chunk1.text + chunk2.text, JSON.stringify(bigWarning));
 });

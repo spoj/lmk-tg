@@ -17,7 +17,7 @@ What the bridge's session prints reaches Telegram, in your topic: messages addre
 
 From Telegram, each [update](https://core.telegram.org/bots/api#update) comes as it is, in JSON:
 
-- What the person writes, sends, presses or edits wakes its member: a reply to a message of yours, or a press of a button under it, comes as a reply to your message, addressed to you; anything else in your topic comes addressed to you.
+- What the person writes, sends, presses or edits wakes its member: a reply to a message of yours, a press of a button under it, or an answer to your poll comes as a reply to your message, addressed to you; anything else in your topic comes addressed to you.
 - Outside every member's topic, it comes urgent, to every member. In a private chat, Telegram opens a new topic for a message sent outside every topic.
 - Any other update, such as a reaction, a location or a topic's new name, comes addressed to no one, so it wakes nobody: find it in your log.
 - A file comes attached. Telegram may take minutes to hand a file over, so it may come after messages sent later.
