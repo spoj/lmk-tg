@@ -302,6 +302,22 @@ test("a slow file survives a restart after Telegram has acknowledged its update"
   assert.deepEqual({ ...call, lmk: call.lmk.toSpliced(-2, 1) }, { lmk: sent("--to", A, "--attach"), text: update, file: "voice bytes" });
 });
 
+test("native calls with an explicit deleted topic fail rather than changing the requested destination", async () => {
+  await agent({ id: "explicit", attachment: file("explicit.json", JSON.stringify({ method: "sendMessage", text: "explicit", message_thread_id: 100 })) });
+  assert.deepEqual(await next(), { tg: "sendMessage", text: "explicit", message_thread_id: 100, chat_id: CHAT });
+  assert.deepEqual(await next(), { lmk: sent("--reply-to", "explicit", "--to", A), text: "Error: sendMessage: Bad Request: message thread not found" });
+});
+
+test("invalid native JSON and a failed getFile download report errors to the requester", async () => {
+  await agent({ id: "invalid", attachment: file("invalid.json", "not JSON") });
+  const invalid = await next();
+  assert.deepEqual(invalid.lmk, sent("--reply-to", "invalid", "--to", A));
+  assert.match(invalid.text, /^SyntaxError:/);
+  await agent({ id: "lostfile", attachment: file("lostfile.json", JSON.stringify({ method: "getFile", file_id: "lost" })) });
+  assert.deepEqual(await next(), { tg: "getFile", file_id: "lost", chat_id: CHAT, message_thread_id: 101 });
+  assert.deepEqual(await next(), { lmk: sent("--reply-to", "lostfile", "--to", A), text: "Error: file download: HTTP 404" });
+});
+
 test("completed updates stay completed and the polling cursor and private state survive a restart", { timeout: 5000 }, async () => {
   const text = human({ message_id: 85, message_thread_id: 101, text: "download finished" });
   const polled = Promise.withResolvers<void>();
