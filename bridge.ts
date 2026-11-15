@@ -116,7 +116,7 @@ async function fromTelegram(update: Json): Promise<void> {
   const fresh = kind === "message";
   const media = fresh && (message.document ?? message.photo?.at(-1) ?? message.video ?? message.audio ?? message.voice
     ?? message.animation ?? message.video_note ?? message.sticker);
-  const origin = lmkOf.get((fresh ? message.reply_to_message : message)?.message_id);
+  const origin = lmkOf.get((fresh || kind === "edited_message" ? message.reply_to_message : message)?.message_id);
   const member = origin?.fp ?? [...topicOf].find(([, thread]) => thread === message.message_thread_id)?.[0];
   // What the person writes, sends, presses or edits wakes its member, or outside every member's topic every member;
   // other updates, such as reactions and a topic's new name, wake no one. A failure wakes whom its update concerns.
@@ -138,13 +138,16 @@ async function fromTelegram(update: Json): Promise<void> {
       if (query) await tg("answerCallbackQuery", { callback_query_id: query.id });
       else if (fresh) record({ tg: message.message_id, lmk: id });
     } catch (error) {
-      await tg("sendMessage", {
-        chat_id: config.chat,
-        message_thread_id: message.message_thread_id,
-        text: String(error),
-        reply_parameters: { message_id: message.message_id },
-      });
-      await lmk(["send", ...to], JSON.stringify({ error: String(error), update }));
+      try {
+        await tg("sendMessage", {
+          chat_id: config.chat,
+          message_thread_id: message.message_thread_id,
+          text: String(error),
+          reply_parameters: { message_id: message.message_id },
+        });
+      } finally {
+        await lmk(["send", ...to], JSON.stringify({ error: String(error), update }));
+      }
     } finally {
       await rm(temp, { recursive: true });
     }

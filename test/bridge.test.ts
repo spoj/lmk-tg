@@ -61,7 +61,7 @@ const server = createServer(async (req, res) => {
   if (method === "getUpdates") return updates.length ? answer(updates.splice(0)) : void (poll = answer);
   did({ tg: method, ...params });
   const refuse = (description: string) => res.end(JSON.stringify({ ok: false, description }));
-  if (method === "fail") return refuse("Bad Request: nope");
+  if (method === "fail" || params.reply_parameters?.message_id === 82) return refuse("Bad Request: nope");
   if (method === "getFile") await held;
   if (deleted.has(params.message_thread_id)) return refuse("Bad Request: message thread not found");
   answer(method === "createForumTopic" ? { message_thread_id: 99 + ++topics }
@@ -244,6 +244,11 @@ test("a topic's name takes more digits where another member's fingerprint begins
   assert.deepEqual(await next(), echo("b1", { message_id: 11 }));
 });
 
+test("an edited cross-topic reply still reaches the original message's author", async () => {
+  const text = human({ message_id: 81, message_thread_id: 101, text: "corrected", reply_to_message: { message_id: 11 }, edit_date: 3 }, "edited_message");
+  assert.deepEqual(await next(), { lmk: sent("--reply-to", "b1", "--to", B), text });
+});
+
 test("a file that fails to come through reaches its member as the error, and getFile fetches it again", async () => {
   const update = human({ message_id: 80, message_thread_id: 101, voice: { file_id: "lost" } });
   assert.deepEqual(await next(), { tg: "getFile", file_id: "lost" });
@@ -255,4 +260,12 @@ test("a file that fails to come through reaches its member as the error, and get
   const call = await next();
   assert.equal(path.basename(call.lmk.at(-2)), "f1.oga");
   assert.deepEqual({ ...call, lmk: call.lmk.toSpliced(-2, 1) }, { ...echo("m8", { file_path: "voice/f1.oga" }), lmk: sent("--attach"), file: "voice bytes" });
+});
+
+test("a failed Telegram error reply does not suppress the group's error report", { timeout: 5000 }, async () => {
+  const update = human({ message_id: 82, message_thread_id: 101, voice: { file_id: "lost" } });
+  assert.deepEqual(await next(), { tg: "getFile", file_id: "lost" });
+  const error = "Error: file download: HTTP 404";
+  assert.deepEqual(await next(), { tg: "sendMessage", chat_id: CHAT, message_thread_id: 101, text: error, reply_parameters: { message_id: 82 } });
+  assert.deepEqual(await next(), { lmk: sent("--to", A), text: JSON.stringify({ error, update: JSON.parse(update) }) });
 });
