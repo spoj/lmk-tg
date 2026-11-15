@@ -285,3 +285,152 @@ if (process.argv.includes("listen")) {
     assert.equal(p2.exitCode, null, `crashed with EPIPE: ${stderr}`);
   });
 });
+
+test("partial ENOSPC append rolls back cleanly, lazy mkdtemp errors report via channels, non-media double-faults do not stall batches, and --home= / --membership args work", { timeout: 10000 }, async () => {
+  // 1. Real kernel ENOSPC partial write on tmpfs rolls back without welding corrupt interior line
+  const nsCheck = spawn("unshare", ["-Urm", "true"]);
+  const [nsCode] = await new Promise<[number | null]>((resolve) => nsCheck.once("exit", (c) => resolve([c])));
+  if (nsCode === 0) {
+    const enospcScript = `
+      set -eu
+      d=\$(mktemp -d /tmp/lmktg-enospc-XXXXXX)
+      trap 'umount -l "\$d/mnt" 2>/dev/null || true; rm -rf "\$d"' EXIT
+      mkdir -p "\$d/mnt"
+      mount -t tmpfs -o size=32k tmpfs "\$d/mnt"
+      STATE="\$d/mnt" BRIDGE=${JSON.stringify(bridgePath)} FAKE_LMK=${JSON.stringify(fakeLmkPath)} node --input-type=module -e '
+        import assert from "node:assert/strict";
+        import { spawn } from "node:child_process";
+        import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+        import { createServer } from "node:http";
+        import { text } from "node:stream/consumers";
+        import { setTimeout as sleep } from "node:timers/promises";
+        import path from "node:path";
+
+        const dir = process.env.STATE;
+        let poll;
+        let offsets = [];
+        let sent = [];
+        const u1 = { update_id: 1, message: { message_id: 1, chat: { id: -100 }, from: { id: 7 }, message_thread_id: 100, text: "x".repeat(9000) } };
+        const server = createServer(async (req, res) => {
+          if (req.url === "/events") { res.flushHeaders(); return; }
+          if (req.url === "/call") { sent.push(JSON.parse(await text(req))); return res.end(JSON.stringify({ id: "h1" })); }
+          const method = req.url.split("/").at(-1);
+          const params = JSON.parse(await text(req));
+          if (method === "getUpdates") {
+            offsets.push(params.offset);
+            if (params.offset <= 1) return res.end(JSON.stringify({ ok: true, result: [u1] }));
+            poll = res;
+            return;
+          }
+          res.end(JSON.stringify({ ok: true, result: { message_id: 1 } }));
+        });
+        await new Promise(r => server.listen(0, "127.0.0.1", r));
+        const base = "http://127.0.0.1:" + server.address().port;
+        writeFileSync(path.join(dir, "config.json"), JSON.stringify({ token: "T", chat: -100, user: 7, session: "S", letmeknow: process.env.FAKE_LMK, api: base }));
+        writeFileSync(path.join(dir, "filler"), "f".repeat(18000));
+        writeFileSync(path.join(dir, "state.jsonl"), JSON.stringify({ fp: "aaaa000000000000", topic: 100 }) + "\\n");
+        const p1 = spawn(process.execPath, [process.env.BRIDGE, dir], { env: { ...process.env, FAKE: base } });
+        let err = "";
+        p1.stderr.on("data", d => err += d);
+        while (!err.includes("ENOSPC")) await sleep(30);
+        unlinkSync(path.join(dir, "filler"));
+        while (!offsets.includes(2)) await sleep(50);
+        p1.kill();
+        await new Promise(r => p1.once("exit", r));
+        for (const line of readFileSync(path.join(dir, "state.jsonl"), "utf8").trim().split("\\n")) JSON.parse(line);
+        server.closeAllConnections();
+        server.close();
+      '
+    `;
+    const ns = spawn("unshare", ["-Urm", "sh", "-c", enospcScript], { stdio: ["ignore", "pipe", "pipe"] });
+    let nsErr = "";
+    ns.stderr!.on("data", (d) => (nsErr += d));
+    const [code] = await new Promise<[number | null]>((resolve) => ns.once("exit", (c) => resolve([c])));
+    assert.equal(code, 0, `tmpfs ENOSPC rollback failed: ${nsErr}`);
+  }
+
+  // 2. Non-media double-fault does not stall batch for 5s, lazy mkdtemp failure reports via channels, and --home="..." + --membership args work
+  await withIsolatedBridge(async ({ dir, start, pushUpdate, next, waitPoll, hooks }) => {
+    const subHome = path.join(dir, "sub home");
+    const fs = await import("node:fs");
+    fs.mkdirSync(subHome);
+    let listenArgv: string[] = [];
+    const argChecker = path.join(dir, "arg-check.mjs");
+    writeFileSync(
+      argChecker,
+      [
+        "#!/usr/bin/env node",
+        'import { text } from "node:stream/consumers";',
+        'import { fileURLToPath } from "node:url";',
+        "const args = process.argv.slice(2);",
+        'if (args.includes("listen")) {',
+        '  await fetch(process.env.FAKE + "/call", { method: "POST", body: JSON.stringify({ listenArgs: args }) });',
+        '  console.log(JSON.stringify({ type: "ready", bin: fileURLToPath(import.meta.url) }));',
+        '  const ev = await fetch(process.env.FAKE + "/events");',
+        "  try { for await (const _ of ev.body) {} } catch {}",
+        "} else {",
+        '  const call = { lmk: args, text: await text(process.stdin) };',
+        '  const ans = await fetch(process.env.FAKE + "/call", { method: "POST", body: JSON.stringify(call) });',
+        "  if (ans.ok) console.log(await ans.text()); else { console.error(await ans.text()); process.exitCode = 1; }",
+        "}",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    writeFileSync(
+      path.join(dir, "state.jsonl"),
+      `${JSON.stringify({ fp: A, topic: 100 })}\n${JSON.stringify({ poll: "p-del", lmk: "poll-req", fp: A })}\n`,
+      { mode: 0o600 },
+    );
+
+    hooks.onCall = (call, res) => {
+      if (call.listenArgs) {
+        listenArgv = call.listenArgs;
+        res.end("{}");
+        return true;
+      }
+      if (call.lmk.includes("poll-req")) {
+        res.writeHead(500).end("letmeknow: expired poll-req");
+        return true;
+      }
+      return false;
+    };
+    hooks.onTg = (method, params, res) => {
+      if (method === "sendMessage" && params.message_thread_id === 100) {
+        res.end(JSON.stringify({ ok: false, description: "Bad Request: message thread not found" }));
+        return true;
+      }
+      return false;
+    };
+
+    start({ letmeknow: `"${argChecker}" --home="${subHome}" --membership="relay.example.com"` });
+    const firstListen = await next();
+    assert.deepEqual(listenArgv, [`--home=${subHome}`, "--session", "S", "listen", "--membership=relay.example.com"]);
+    void firstListen;
+    await waitPoll(0);
+
+    // Make TMPDIR read-only: plain text still succeeds (no mkdtemp needed!), while poll_answer double-fault falls back to top-level notice and doesn't stall u2 for 5s!
+    chmodSync(dir, 0o500);
+    try {
+      // state.jsonl already exists (0600) so appends still succeed!
+      const t0 = Date.now();
+      const u1 = { update_id: 1, poll_answer: { poll_id: "p-del", user: { id: USER }, option_ids: [0] } };
+      const u2 = { update_id: 2, message: { message_id: 50, chat: { id: CHAT }, from: { id: USER }, message_thread_id: 100, text: "plain text without mkdtemp" } };
+      pushUpdate(u1);
+      pushUpdate(u2);
+
+      assert.equal((await next()).lmk[0], `--home=${subHome}`); // u1 initial lmk send (fails, no --membership!)
+      assert.equal((await next()).tg, "sendMessage"); // u1 deleted topic 100 attempt
+      const topNotice = await next(); // u1 top-level fallback notice!
+      assert.equal(topNotice.tg, "sendMessage");
+      assert.equal(topNotice.message_thread_id, undefined);
+      assert.equal((await next()).lmk[0], `--home=${subHome}`); // u1 lmk error report
+
+      const u2Call = await next();
+      assert.equal(JSON.parse(u2Call.text).update_id, 2);
+      assert.ok(Date.now() - t0 < 2000, "u2 was stalled by spurious 5s backoff");
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+});

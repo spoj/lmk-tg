@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, openAsBlob, readFileSync, truncateSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, openAsBlob, readFileSync, statSync, truncateSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -48,7 +48,13 @@ function apply(entry: Entry): void {
 }
 
 function record(entry: Entry): void {
-  appendFileSync(statePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  const size = existsSync(statePath) ? statSync(statePath).size : 0;
+  try {
+    appendFileSync(statePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  } catch (error) {
+    if (existsSync(statePath)) truncateSync(statePath, size);
+    throw error;
+  }
   apply(entry);
 }
 
@@ -105,7 +111,7 @@ async function fromLmk(event: Json): Promise<void> {
     return;
   }
   let { id, from, attachment, content = "" } = event;
-  const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
+  let temp: string | undefined;
   try {
     if (event.truncated && log && existsSync(log)) {
       const whole = readFileSync(log, "utf8").split("\n").findLast((line) => {
@@ -153,19 +159,22 @@ async function fromLmk(event: Json): Promise<void> {
         if (item?.poll?.id) record({ poll: item.poll.id, lmk: id, fp: from });
       }
       // getFile's result brings the file with it.
-      const outBase = result?.file_path && path.basename(result.file_path);
-      const file = result?.file_path && path.join(temp, outBase && outBase !== "." && outBase !== ".." ? outBase : "file");
-      if (file) {
+      if (result?.file_path) {
+        temp ??= await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
+        const outBase = path.basename(result.file_path);
+        const file = path.join(temp, outBase && outBase !== "." && outBase !== ".." ? outBase : "file");
         const response = await fetch(`${root}/file/bot${config.token}/${result.file_path}`);
         if (!response.ok) throw new Error(`file download: HTTP ${response.status}`);
         await writeFile(file, Buffer.from(await response.arrayBuffer()));
+        await lmk(["send", "--attach", file], JSON.stringify({ request: id, result }));
+      } else {
+        await lmk(["send"], JSON.stringify({ request: id, result }));
       }
-      await lmk(["send", ...(file ? ["--attach", file] : [])], JSON.stringify({ request: id, result }));
     }
   } catch (error) {
     await lmk(["send", "--reply-to", id, "--to", from], String(error));
   } finally {
-    await rm(temp, { recursive: true });
+    if (temp) await rm(temp, { recursive: true });
   }
 }
 
@@ -192,13 +201,14 @@ async function fromTelegram(update: Json): Promise<void> {
   const to = member ? ["--to", member] : said ? ["--urgent"] : [];
   if (!pending.has(update.update_id)) record({ update });
   const forward = async () => {
-    const temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
+    let temp: string | undefined;
     const args = said ? [...(origin?.fp ? ["--reply-to", origin.lmk] : []), ...to] : [];
     try {
       if (media) {
         const { file_path } = await tg("getFile", { file_id: media.file_id });
         const response = await fetch(`${root}/file/bot${config.token}/${file_path}`);
         if (!response.ok) throw new Error(`file download: HTTP ${response.status}`);
+        temp = await mkdtemp(path.join(tmpdir(), "lmk-tg-"));
         const name = path.basename(media.file_name || "");
         const fallback = path.basename(file_path || "");
         const target = path.join(temp, name && name !== "." && name !== ".." ? name : fallback && fallback !== "." && fallback !== ".." ? fallback : "file");
@@ -210,23 +220,25 @@ async function fromTelegram(update: Json): Promise<void> {
       record({ done: update.update_id });
       if (query) await tg("answerCallbackQuery", { callback_query_id: query.id }).catch(console.error);
     } catch (error) {
-      try {
-        await tg("sendMessage", {
-          chat_id: config.chat,
-          message_thread_id: pollAnswer ? topicOf.get(member!) : message?.message_thread_id,
-          text: String(error),
-          ...(message?.message_id ? { reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true } } : {}),
-        });
-      } finally {
-        const report = JSON.stringify({ error: String(error), update });
-        await lmk(["send", ...to], report).catch((err) => {
-          if (!to.length) throw err;
-          return lmk(["send"], report);
-        });
-        record({ done: update.update_id });
-      }
+      const notice = {
+        chat_id: config.chat,
+        message_thread_id: pollAnswer ? topicOf.get(member!) : message?.message_thread_id,
+        text: String(error),
+        ...(message?.message_id ? { reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true } } : {}),
+      };
+      await tg("sendMessage", notice)
+        .catch((err) => pollAnswer && /message thread not found/.test(err.message)
+          ? tg("sendMessage", { chat_id: config.chat, text: String(error) })
+          : Promise.reject(err))
+        .catch(console.error);
+      const report = JSON.stringify({ error: String(error), update });
+      await lmk(["send", ...to], report).catch((err) => {
+        if (!to.length) throw err;
+        return lmk(["send"], report);
+      });
+      record({ done: update.update_id });
     } finally {
-      await rm(temp, { recursive: true });
+      if (temp) await rm(temp, { recursive: true });
     }
   };
   // Telegram may take minutes to hand over a file: later messages do not wait for it.
@@ -244,13 +256,25 @@ if (existsSync(statePath)) {
   for (const line of raw.split("\n")) if (line) apply(JSON.parse(line));
 }
 
-const [command, ...prefix] = (config.letmeknow.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((arg) => arg.replace(/^['"]|['"]$/g, ""));
+const [command, ...rawPrefix] = (config.letmeknow.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [])
+  .map((arg) => arg.replace(/"([^"]*)"|'([^']*)'/g, "$1$2"));
+const prefix: string[] = [];
 const shared: string[] = [];
-for (let i = 0; i < prefix.length; i++) {
-  if ((prefix[i] === "--home" || prefix[i] === "--membership") && i + 1 < prefix.length) shared.push(prefix[i], prefix[++i]);
-  else if (prefix[i].startsWith("--home=") || prefix[i].startsWith("--membership=")) shared.push(prefix[i]);
+const listenArgs: string[] = [];
+for (let i = 0; i < rawPrefix.length; i++) {
+  const arg = rawPrefix[i];
+  if (arg === "--membership" && i + 1 < rawPrefix.length) listenArgs.push(arg, rawPrefix[++i]);
+  else if (arg.startsWith("--membership=")) listenArgs.push(arg);
+  else {
+    prefix.push(arg);
+    if (arg === "--home" && i + 1 < rawPrefix.length) {
+      const val = rawPrefix[++i];
+      prefix.push(val);
+      shared.push(arg, val);
+    } else if (arg.startsWith("--home=")) shared.push(arg);
+  }
 }
-const listen = spawn(command, [...prefix, "--session", config.session, "listen"], { stdio: ["ignore", "pipe", "inherit"] });
+const listen = spawn(command, [...prefix, "--session", config.session, "listen", ...listenArgs], { stdio: ["ignore", "pipe", "inherit"] });
 listen.on("exit", (code) => process.exit(code ?? 1));
 const lines = createInterface({ input: listen.stdout })[Symbol.asyncIterator]();
 const first = await lines.next();
@@ -276,7 +300,7 @@ for (;;) {
       offset = update.update_id + 1;
     } catch (error) {
       console.error(error);
-      if (!pending.has(update.update_id)) {
+      if (offset <= update.update_id) {
         await sleep(5_000);
         break;
       }
